@@ -13,21 +13,19 @@ from telegram.ext import (
     filters,
 )
 
-# Загружаем переменные из .env
+# Загрузка токенов из .env
 load_dotenv()
-
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 NOTION_TOKEN = os.getenv("NOTION_TOKEN")
 NOTION_DATABASE_ID = os.getenv("NOTION_DATABASE_ID")
 
-# Заголовки Notion API
 NOTION_HEADERS = {
     "Authorization": f"Bearer {NOTION_TOKEN}",
     "Content-Type": "application/json",
     "Notion-Version": "2022-06-28"
 }
 
-# Сохранение записи в Notion
+# Сохраняет трату в Notion
 async def save_to_notion(category, amount):
     url = "https://api.notion.com/v1/pages"
     today = datetime.now().strftime("%Y-%m-%d")
@@ -44,7 +42,7 @@ async def save_to_notion(category, amount):
     response = requests.post(url, headers=NOTION_HEADERS, json=data)
     return response.status_code == 200
 
-# Получение расходов между двумя датами
+# Получение расходов из Notion
 def get_expenses(start_date, end_date):
     url = f"https://api.notion.com/v1/databases/{NOTION_DATABASE_ID}/query"
     payload = {
@@ -62,16 +60,13 @@ def get_expenses(start_date, end_date):
 
     for entry in results:
         props = entry["properties"]
-        try:
-            category = props["Категория"]["title"][0]["plain_text"]
-            amount = props["Сумма"]["number"]
-            expenses[category] += amount
-        except Exception:
-            continue
+        category = props["Категория"]["title"][0]["plain_text"]
+        amount = props["Сумма"]["number"]
+        expenses[category] += amount
 
     return expenses
 
-# Топ категорий для клавиатуры
+# Получение популярных категорий
 def get_top_categories(n=5):
     start_date = (datetime.now() - timedelta(days=30)).strftime("%Y-%m-%d")
     end_date = datetime.now().strftime("%Y-%m-%d")
@@ -79,19 +74,12 @@ def get_top_categories(n=5):
     sorted_categories = sorted(all_expenses.items(), key=lambda x: x[1], reverse=True)
     return [name for name, _ in sorted_categories[:n]]
 
-# Обработка обычного сообщения
+# Обработка текстовых сообщений
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     parts = text.split()
-
-    if len(parts) == 2 and parts[1].replace(',', '').replace('.', '').isdigit():
+    if len(parts) == 2 and parts[1].isdigit():
         category, amount = parts
-        try:
-            amount = float(amount.replace(',', '.'))
-        except ValueError:
-            await update.message.reply_text("⚠️ Неверный формат суммы.")
-            return
-
         success = await save_to_notion(category, amount)
         if success:
             await update.message.reply_text("✅ Сохранено в Notion.")
@@ -131,7 +119,7 @@ async def send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     await update.message.reply_text(message)
 
-# Запуск с polling (а не webhook!)
+# Запуск бота — polling (без webhook)
 def main():
     app = Application.builder().token(TELEGRAM_TOKEN).build()
 
@@ -139,6 +127,7 @@ def main():
     app.add_handler(CommandHandler(["week", "week2", "week3", "month"], send_summary))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
+    print("🤖 Бот запущен с polling...")
     app.run_polling()
 
 if __name__ == "__main__":
