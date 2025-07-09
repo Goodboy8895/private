@@ -40,6 +40,11 @@ async def save_to_notion(category, amount):
     }
 
     response = requests.post(url, headers=NOTION_HEADERS, json=data)
+    
+    # >>> вывод ошибки для отладки
+    print("Notion response:", response.status_code)
+    print("Notion response text:", response.text)
+    
     return response.status_code == 200
 
 # Получение всех трат
