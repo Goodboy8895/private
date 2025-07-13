@@ -2,155 +2,184 @@ import os
 import logging
 from datetime import datetime, timedelta
 
-from dotenv import load_dotenv
-from notion_client import Client
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, KeyboardButton, ReplyKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder,
+    Application,
     CommandHandler,
     MessageHandler,
     ContextTypes,
     filters,
 )
+from notion_client import Client
+from dotenv import load_dotenv
 
-# ─── ЗАГРУЗКА ПЕРЕМЕННЫХ ─────────────────────────────────────────────────────────
-load_dotenv()  # берём переменные из .env
+# -----------------------------------------------------------------------------
+# 1. Настройка окружения и клиентов
+# -----------------------------------------------------------------------------
+load_dotenv()  # читает .env рядом с кодом
 
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-NOTION_DB_EXPENSES = os.getenv("NOTION_DB_EXPENSES")  # ID вашей таблицы «Expenses»
+TELEGRAM_TOKEN       = os.getenv("TELEGRAM_TOKEN")
+NOTION_TOKEN         = os.getenv("NOTION_TOKEN")
+NOTION_DB_EXPENSES   = os.getenv("NOTION_DB_EXPENSES")
+# (при желании можно также подключить базы для доходов и долгов)
+# NOTION_DB_INCOME  = os.getenv("NOTION_DB_INCOME")
+# NOTION_DB_DEBTS   = os.getenv("NOTION_DB_DEBTS")
+# NOTION_DB_DEBTORS = os.getenv("NOTION_DB_DEBTORS")
 
-# ─── N O T I O N ────────────────────────────────────────────────────────────────
+# инициализируем http-клиент Notion
 notion = Client(auth=NOTION_TOKEN)
 
-# ─── ЛОГИ ───────────────────────────────────────────────────────────────────────
+# логирование в консоль
 logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-    level=logging.INFO,
+    level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-# ─── ШАБЛОННЫЕ КНОПКИ ───────────────────────────────────────────────────────────
-CATEGORIES_KEYBOARD = [
-    ["Еда", "Транспорт"],
-    ["Жилье", "Связь"],
-    ["Развлечения", "Другое"],
-]
+DATE_FORMAT = "%Y-%m-%d"
 
-# ─── /start ─────────────────────────────────────────────────────────────────────
+
+# -----------------------------------------------------------------------------
+# 2. Хэндлер команды /start
+# -----------------------------------------------------------------------------
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Приветственное сообщение.
-    Пользователь видит пример формата и кнопки с категориями.
+    Команда /start: присылает клавиатуру с кнопками периодов отчета
     """
+    keyboard = [
+        [KeyboardButton("Сегодня"), KeyboardButton("Неделя"), KeyboardButton("Неделя2")],
+        [KeyboardButton("Неделя3"), KeyboardButton("Месяц")],
+    ]
+    markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(
-        "👋 Привет! Я бот учёта расходов.\n\n"
-        "Просто отправь сообщение вида:\n"
-        "<категория> <сумма>\n"
-        "Например: Еда 6400\n\n"
-        "Или выбери категорию кнопкой ниже:",
-        reply_markup=ReplyKeyboardMarkup(CATEGORIES_KEYBOARD, resize_keyboard=True),
+        "Привет! Выберите период отчёта или отправьте расход в формате:\n"
+        "<категория> <сумма>\n\n"
+        "Например: еда 6400",
+        reply_markup=markup,
     )
 
-# ─── ОТЧЁТЫ ────────────────────────────────────────────────────────────────────
-async def send_summary(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Обработка команд /week, /week2, /week3, /month.
-    Формирует запрос к Notion, собирает траты за нужный период и отправляет список + итог.
-    """
-    cmd = update.message.text.lstrip("/").lower()
-    days_map = {"week": 7, "week2": 14, "week3": 21, "month": 31}
-    days = days_map.get(cmd, 7)
 
-    start_date = (datetime.now() - timedelta(days=days)).strftime("%Y-%m-%d")
-    end_date = datetime.now().strftime("%Y-%m-%d")
+# -----------------------------------------------------------------------------
+# 3. Хэндлер для кнопок отчёта
+# -----------------------------------------------------------------------------
+async def report(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    При нажатии на одну из кнопок: Сегодня, Неделя, Неделя2, Неделя3, Месяц
+    собираем из Notion все записи за выбранный период и шлём сводку.
+    """
+    cmd = update.message.text.lower()
+    days_map = {
+        "сегодня": 1,
+        "неделя": 7,
+        "неделя2": 14,
+        "неделя3": 21,
+        "месяц": 31,
+    }
 
-    # Запрос в Notion
+    if cmd not in days_map:
+        return  # не наша кнопка
+
+    days = days_map[cmd]
+    end = datetime.now()
+    start = end - timedelta(days=days - 1)
+
+    # запрос к Notion
     query = {
-        "database_id": NOTION_DB_EXPENSES,
         "filter": {
             "and": [
-                {"property": "Дата", "date": {"on_or_after": start_date}},
-                {"property": "Дата", "date": {"on_or_before": end_date}},
+                {"property": "Дата", "date": {"on_or_after": start.strftime(DATE_FORMAT)}},
+                {"property": "Дата", "date": {"on_or_before": end.strftime(DATE_FORMAT)}},
             ]
-        },
+        }
     }
-    res = notion.databases.query(**query)
-    results = res.get("results", [])
+    result = notion.databases.query(database_id=NOTION_DB_EXPENSES, **query)
 
-    # Сбор статистики
+    # собираем суммы по категориям
     totals = {}
-    grand_total = 0.0
-    for page in results:
+    for page in result.get("results", []):
         props = page["properties"]
         cat = props["Категория"]["title"][0]["plain_text"]
-        amt = props["Сумма"]["number"] or 0
-        totals[cat] = totals.get(cat, 0) + amt
-        grand_total += amt
+        val = props["Сумма"]["number"]
+        totals[cat] = totals.get(cat, 0) + val
 
-    # Ответ
     if not totals:
         await update.message.reply_text("Нет расходов за этот период.")
         return
 
-    text = [f"📊 Расходы за {days} дней:"]
-    for cat, amt in sorted(totals.items(), key=lambda x: -x[1]):
-        text.append(f"• {cat}: {amt:.0f}")
-    text.append(f"\n💰 Итого: {grand_total:.0f}")
+    # формируем текст отчёта
+    text = f"📊 Расходы за {days} дн:\n"
+    total_sum = 0
+    for cat, val in sorted(totals.items(), key=lambda x: x[1], reverse=True):
+        text += f"• {cat}: {val:.2f}\n"
+        total_sum += val
+    text += f"\n🔹 Итого: {total_sum:.2f}"
 
-    await update.message.reply_text("\n".join(text), reply_markup=ReplyKeyboardRemove())
+    await update.message.reply_text(text)
 
-# ─── ОБРАБОТКА ТЕКСТОВЫХ СООБЩЕНИЙ ──────────────────────────────────────────────
+
+# -----------------------------------------------------------------------------
+# 4. Хэндлер обычного сообщения — сохранение расхода
+# -----------------------------------------------------------------------------
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
-    Вся логика «без дополнительных кнопок».
-    Парсим «Категория Сумма» и создаём новую страницу в базе расходов.
+    Ожидаем текст вида "<категория> <сумма>". 
+    Сохраняем новую страницу в БД расходов Notion.
     """
     text = update.message.text.strip()
     parts = text.split()
 
-    # проверяем формат «X Y», где Y — число
-    if len(parts) == 2 and parts[1].replace(".", "", 1).isdigit():
-        category, amount_str = parts
-        amount = float(amount_str)
-        try:
-            notion.pages.create(
-                parent={"database_id": NOTION_DB_EXPENSES},
-                properties={
-                    "Категория": {"title": [{"text": {"content": category}}]},
-                    "Сумма": {"number": amount},
-                    "Дата": {"date": {"start": datetime.now().strftime("%Y-%m-%d")}},
-                },
-            )
-            await update.message.reply_text(
-                f"✅ Сохранено: {category} {amount_str}",
-                reply_markup=ReplyKeyboardRemove(),
-            )
-        except Exception as e:
-            logger.error(f"Не удалось сохранить в Notion: {e}")
-            await update.message.reply_text("❌ Ошибка при сохранении.")
-    else:
+    # проверяем формат
+    if len(parts) != 2 or not parts[1].replace(".", "", 1).isdigit():
         await update.message.reply_text("⚠️ Неверный формат. Пример: еда 6400")
+        return
 
-# ─── НЕИЗВЕСТНЫЕ КОМАНДЫ ───────────────────────────────────────────────────────
-async def unknown(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("❓ Неизвестная команда. Используйте /start")
+    cat, amt_str = parts
+    amount = float(amt_str)
+    today = datetime.now().strftime(DATE_FORMAT)
 
-# ─── MAIN ───────────────────────────────────────────────────────────────────────
+    try:
+        notion.pages.create(
+            parent={"database_id": NOTION_DB_EXPENSES},
+            properties={
+                "Категория": {"title": [{"text": {"content": cat}}]},
+                "Сумма": {"number": amount},
+                "Дата": {"date": {"start": today}},
+            }
+        )
+        await update.message.reply_text(f"✅ Сохранено: {cat} {amount:.2f}")
+    except Exception as e:
+        logger.error(f"Ошибка при сохранении в Notion: {e}")
+        await update.message.reply_text("❌ Ошибка сохранения.")
+
+
+# -----------------------------------------------------------------------------
+# 5. Поднятие приложения и Webhook на Render
+# -----------------------------------------------------------------------------
 def main():
-    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
 
-    # команды
+    # регистрируем обработчики
     app.add_handler(CommandHandler("start", start))
     app.add_handler(
-        CommandHandler(["week", "week2", "week3", "month"], send_summary)
+        MessageHandler(
+            filters.TEXT
+            & ~filters.COMMAND
+            & filters.Regex("^(Сегодня|Неделя|Неделя2|Неделя3|Месяц)$"),
+            report
+        )
     )
-    # любые текстовые сообщения
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    # всё остальное
-    app.add_handler(MessageHandler(filters.COMMAND, unknown))
+    app.add_handler(
+        MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message)
+    )
 
-    app.run_polling()
+    # запускаем webhook-сервер
+    app.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", "10000")),
+        url_path=TELEGRAM_TOKEN,  # 
+        webhook_url=f"https://{os.environ['RENDER_EXTERNAL_HOSTNAME']}/{TELEGRAM_TOKEN}"
+    )
+
 
 if __name__ == "__main__":
     main()
