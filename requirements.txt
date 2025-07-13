@@ -1,4 +1,4 @@
-python-telegram-bot==22.2.0
+python-telegram-bot[webhooks]==22.2.0
 notion-client
 python-dotenv
 pandas
