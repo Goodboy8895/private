@@ -4,3 +4,4 @@ python-dotenv
 pandas
 openpyxl
 pymongo==4.8.0
+certifi==2025.10.5
