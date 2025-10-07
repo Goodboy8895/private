@@ -1,4 +1,5 @@
 import os
+import certifi
 import logging
 from datetime import datetime, timedelta, date
 from zoneinfo import ZoneInfo
@@ -42,10 +43,14 @@ logging.basicConfig(
 logger = logging.getLogger("dmk-bot")
 
 # Mongo
-mongo_client = MongoClient(MONGODB_URI)
+mongo_client = MongoClient(
+    MONGODB_URI,
+    tls=True,
+    tlsCAFile=certifi.where(),            # <<< важная строка
+    serverSelectionTimeoutMS=30000
+)
 db = mongo_client[MONGO_DB_NAME]
-tx: Collection = db["transactions"]
-
+tx = db["transactions"]
 # индексы
 tx.create_index([("user_id", ASCENDING), ("date", ASCENDING)])
 tx.create_index([("user_id", ASCENDING), ("kind", ASCENDING), ("date", ASCENDING)])
